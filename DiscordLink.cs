@@ -101,12 +101,12 @@ namespace Oxide.Plugins
             Config["API", "VerifiedUsersUrl"] = "http://localhost:3000/api/verified-users";
             Config["Group", "Name"] = "discord";
 
-            Config["Messages", "AlreadyVerified"] = "⚠️ You have already been verified.";
-            Config["Messages", "NowVerified"] = "✅ You have been verified and added to the group!";
-            Config["Messages", "NotVerified"] = "❌ You are not verified. Please link your account first.";
-            Config["Messages", "ApiError"] = "❌ Could not verify your account (HTTP {code})";
-            Config["Messages", "ParseError"] = "❌ Error parsing the verification response.";
-            Config["Messages", "DiscordLink"] = "🔗 Link your Discord account at https://example.com";
+            Config["Messages", "AlreadyVerified"] = "You have already been verified.";
+            Config["Messages", "NowVerified"] = "You have been verified and added to the group!";
+            Config["Messages", "NotVerified"] = "You are not verified. Please link your account first.";
+            Config["Messages", "ApiError"] = "Could not verify your account (HTTP {code})";
+            Config["Messages", "ParseError"] = "Error parsing the verification response.";
+            Config["Messages", "DiscordLink"] = "Link your Discord account at https://example.com";
 
             SaveConfig();
         }
