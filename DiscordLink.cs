@@ -1,29 +1,36 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using Oxide.Core.Libraries.Covalence;
-using TinyJSON;
 using Oxide.Core;
 using Oxide.Core.Libraries;
+using Oxide.Ext.WebSocketClient;
+using Oxide.Core.Plugins;
+using Newtonsoft.Json; 
 
 namespace Oxide.Plugins
 {
-    [Info("DiscordLink", "Asian", "1.0.0")]
-    [Description("Links verified users to Discord group based on external API")]
+    [Info("DiscordLink", "Asian", "1.1.0")]
+    [Description("Links verified users to Discord group via WebSocket API")]
     public class DiscordLink : CovalencePlugin
     {
-        private string ApiUrl => GetConfigValue("API", "VerifiedUsersUrl", "http://localhost:3000/api/verified-users");
+        private WebSocketClientExtension _webSocketExt;
+        private string ConnectionId => "verification";
+
+        // Config properties
+        private string WebSocketUrl => GetConfigValue("API", "WebSocketUrl", "ws://localhost:3000");
         private string DiscordGroup => GetConfigValue("Group", "Name", "discord");
 
         private string MsgAlreadyVerified => GetConfigValue("Messages", "AlreadyVerified", "You have already been verified.");
         private string MsgNowVerified => GetConfigValue("Messages", "NowVerified", "You have been verified and added to the group!");
         private string MsgNotVerified => GetConfigValue("Messages", "NotVerified", "You are not verified. Please link your account first.");
-        private string MsgApiError => GetConfigValue("Messages", "ApiError", "Could not verify your account (HTTP {code})");
+        private string MsgConnectionError => GetConfigValue("Messages", "ConnectionError", "Could not connect to verification service.");
         private string MsgParseError => GetConfigValue("Messages", "ParseError", "Error parsing the verification response.");
         private string MsgDiscordLink => GetConfigValue("Messages", "DiscordLink", "Link your Discord account at https://example.com");
 
         private void Init()
         {
-            Puts("Discord Link Loaded Correctly!");
+            Puts("DiscordLink Loaded!");
 
             AddCovalenceCommand("discord", "CmdDiscord");
             AddCovalenceCommand("verify", "CmdVerify");
@@ -33,8 +40,99 @@ namespace Oxide.Plugins
                 permission.CreateGroup(DiscordGroup, DiscordGroup, 0);
                 Puts($"Created permission group '{DiscordGroup}'.");
             }
+
+            // Get WebSocket extension
+            _webSocketExt = Interface.Oxide.GetExtension<WebSocketClientExtension>();
+            if (_webSocketExt == null)
+            {
+                PrintError("WebSocketClient extension not found! Please ensure it's installed.");
+                return;
+            }
+
+            // Connect to WebSocket server
+            Task.Run(async () => await ConnectToWebSocket());
         }
 
+        private async Task ConnectToWebSocket()
+        {
+            try
+            {
+                bool connected = await _webSocketExt.ConnectAsync(ConnectionId, WebSocketUrl, this);
+                if (connected)
+                {
+                    Puts($"Connected to WebSocket server: {WebSocketUrl}");
+                }
+                else
+                {
+                    PrintError($"Failed to connect to WebSocket server: {WebSocketUrl}");
+                }
+            }
+            catch (Exception ex)
+            {
+                PrintError($"Error connecting to WebSocket: {ex.Message}");
+            }
+        }
+
+        private void Unload()
+        {
+            // Disconnect from WebSocket when plugin unloads
+            if (_webSocketExt != null && _webSocketExt.IsConnected(ConnectionId))
+            {
+                Task.Run(async () => await _webSocketExt.DisconnectAsync(ConnectionId));
+            }
+        }
+
+        // WebSocket event handlers
+        [HookMethod("OnWebSocketConnected")]
+        private void OnWebSocketConnected(string connectionId)
+        {
+            if (connectionId == ConnectionId)
+            {
+                Puts("WebSocket verification service connected!");
+            }
+        }
+
+        [HookMethod("OnWebSocketConnectionFailed")]
+        private void OnWebSocketConnectionFailed(string connectionId, string error)
+        {
+            if (connectionId == ConnectionId)
+            {
+                PrintError($"WebSocket connection failed: {error}");
+            }
+        }
+
+        [HookMethod("OnWebSocketMessage")]
+        private void OnWebSocketMessage(string connectionId, string message)
+        {
+            if (connectionId == ConnectionId)
+            {
+                Puts($"Received verification data: {message}");
+                ProcessVerificationData(message);
+            }
+        }
+
+        [HookMethod("OnWebSocketDisconnected")]
+        private void OnWebSocketDisconnected(string connectionId)
+        {
+            if (connectionId == ConnectionId)
+            {
+                PrintWarning("WebSocket verification service disconnected!");
+
+                // Attempt to reconnect after 5 seconds
+                timer.Once(5f, () => Task.Run(async () => await ConnectToWebSocket()));
+            }
+        }
+
+        [HookMethod("OnWebSocketError")]
+        private void OnWebSocketError(string connectionId, string error)
+        {
+            if (connectionId == ConnectionId)
+            {
+                PrintError($"WebSocket error: {error}");
+            }
+        }
+
+        // Command handlers
         private void CmdDiscord(IPlayer player, string command, string[] args)
         {
             player.Reply(MsgDiscordLink);
@@ -42,69 +140,123 @@ namespace Oxide.Plugins
 
         private void CmdVerify(IPlayer player, string command, string[] args)
         {
-            webrequest.Enqueue(ApiUrl, null, (code, response) =>
+            if (_webSocketExt == null || !_webSocketExt.IsConnected(ConnectionId))
             {
-                if (code != 200 || string.IsNullOrEmpty(response))
+                player.Reply(MsgConnectionError);
+                return;
+            }
+
+            // Send request for verification data (you can customize this message format)
+            string requestMessage = $"{{\"action\":\"verify\",\"steamId\":\"{player.Id}\"}}";
+
+            Task.Run(async () =>
+            {
+                bool sent = await _webSocketExt.SendMessageAsync(ConnectionId, requestMessage);
+                if (!sent)
                 {
-                    player.Reply(MsgApiError.Replace("{code}", code.ToString()));
-                    return;
+                    player.Reply(MsgConnectionError);
                 }
+            });
+        }
 
-                try
+
+        private class WebSocketMessage
+        {
+            public string type { get; set; }
+            public VerifiedUser data { get; set; }
+        }
+
+        private void ProcessVerificationData(string jsonResponse)
+        {
+            try
+            {
+
+                WebSocketMessage message = JsonConvert.DeserializeObject<WebSocketMessage>(jsonResponse);
+
+                if (message != null && message.type == "user_verified" && message.data != null)
                 {
-                    var users = TinyJSON.JSON.Load(response).Make<List<VerifiedUser>>();
-                    string steamId = player.Id;
+                    ProcessUserVerification(message.data);
+                }
+                else
+                {
+                    PrintWarning($"Received unexpected WebSocket message type or format: {jsonResponse}");
+                }
+            }
+            catch (JsonSerializationException ex)
+            {
+                PrintError($"JSON deserialization error: {ex.Message} (Input: {jsonResponse})");
+            }
+            catch (Exception ex)
+            {
+                PrintError($"Failed to parse verification data: {ex.Message} (Input: {jsonResponse})");
+                // Log the inner exception if available for more details
+                if (ex.InnerException != null)
+                {
+                    PrintError($"Inner Exception: {ex.InnerException.Message}");
+                    PrintError($"Inner Exception Stack Trace: {ex.InnerException.StackTrace}");
+                }
+            }
+        }
 
-                    foreach (var user in users)
+        private void ProcessUserVerification(VerifiedUser user)
+        {
+            try
+            {
+                string steamId = user.steamId;
+                var player = players.FindPlayerById(steamId);
+
+                if (player != null && player.IsConnected)
+                {
+                    if (!permission.UserHasGroup(steamId, DiscordGroup))
                     {
-                        if (user.steamId == steamId)
-                        {
-                            if (!permission.UserHasGroup(steamId, DiscordGroup))
-                            {
-                                permission.AddUserGroup(steamId, DiscordGroup);
-                                player.Reply(MsgNowVerified);
-                            }
-                            else
-                            {
-                                player.Reply(MsgAlreadyVerified);
-                            }
-                            return;
-                        }
+                        permission.AddUserGroup(steamId, DiscordGroup);
+                        player.Reply(MsgNowVerified);
+                        Puts($"Verified user {user.steamName} ({steamId}) and added to {DiscordGroup} group");
                     }
-
-                    player.Reply(MsgNotVerified);
+                    else
+                    {
+                        player.Reply(MsgAlreadyVerified);
+                    }
                 }
-                catch (Exception ex)
+                else
                 {
-                    player.Reply(MsgParseError);
-                    PrintError($"Failed to parse JSON response: {ex.Message}");
+                    // User not online, still add to group for when they connect
+                    if (!permission.UserHasGroup(steamId, DiscordGroup))
+                    {
+                        permission.AddUserGroup(steamId, DiscordGroup);
+                        Puts($"Verified offline user {user.steamName} ({steamId}) and added to {DiscordGroup} group");
+                    }
                 }
-
-            }, this, RequestMethod.GET);
+            }
+            catch (Exception ex)
+            {
+                PrintError($"Error processing user verification: {ex.Message}");
+            }
         }
 
         private class VerifiedUser
         {
-            public int id;
-            public string steamId;
-            public string steamName;
-            public string steamAvatarUrl;
-            public string discordId;
-            public string discordUsername;
-            public string discordAvatar;
+            public int id { get; set; }
+            public string steamId { get; set; }
+            public string steamName { get; set; }
+            public string steamAvatarUrl { get; set; }
+            public string discordId { get; set; }
+            public string discordUsername { get; set; }
+            public string discordAvatar { get; set; }
         }
 
+        // Configuration
         protected override void LoadDefaultConfig()
         {
             LogWarning("Generating new config file...");
 
-            Config["API", "VerifiedUsersUrl"] = "http://localhost:3000/api/verified-users";
+            Config["API", "WebSocketUrl"] = "ws://localhost:3000/";
             Config["Group", "Name"] = "discord";
 
             Config["Messages", "AlreadyVerified"] = "You have already been verified.";
             Config["Messages", "NowVerified"] = "You have been verified and added to the group!";
             Config["Messages", "NotVerified"] = "You are not verified. Please link your account first.";
-            Config["Messages", "ApiError"] = "Could not verify your account (HTTP {code})";
+            Config["Messages", "ConnectionError"] = "Could not connect to verification service.";
             Config["Messages", "ParseError"] = "Error parsing the verification response.";
             Config["Messages", "DiscordLink"] = "Link your Discord account at https://example.com";
 
