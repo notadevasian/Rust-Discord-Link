@@ -1,12 +1,12 @@
-WebSocket Client Extension - Plugin Hooks Documentation
+# WebSocket Client Extension - Plugin Hooks Documentation
 
-Overview
+## Overview
 
-The WebSocket Client Extension provides several hooks that your plugins can implement to handle WebSocket events. These hooks are automatically called when specific WebSocket events occur.
+<ins>The WebSocket Client Extension provides several hooks that your plugins can implement to handle WebSocket events. These hooks are automatically called when specific WebSocket events occur.</ins>
 
 Available Hooks
 
-OnWebSocketConnected
+### OnWebSocketConnected
 
 Called when a WebSocket connection is successfully established.
 Parameters:
