@@ -6,19 +6,24 @@ using Oxide.Core;
 using Oxide.Core.Libraries;
 using Oxide.Ext.WebSocketClient;
 using Oxide.Core.Plugins;
-using Newtonsoft.Json; 
+using Newtonsoft.Json;
 
 namespace Oxide.Plugins
 {
-    [Info("DiscordLink", "Asian", "1.1.0")]
+    [Info("DiscordLink", "Asian", "1.1.1")]
     [Description("Links verified users to Discord group via WebSocket API")]
     public class DiscordLink : CovalencePlugin
     {
+        #region Fields
         private WebSocketClientExtension _webSocketExt;
         private string ConnectionId => "verification";
+        private bool _isConnecting = false;
+        private bool _isUnloading = false;
+        private Timer _reconnectTimer;
+        #endregion
 
-        // Config properties
-        private string WebSocketUrl => GetConfigValue("API", "WebSocketUrl", "ws://localhost:3000");
+        #region Configuration Properties
+        private string WebSocketUrl => GetConfigValue("API", "WebSocketUrl", "wss://api.spectality.net");
         private string DiscordGroup => GetConfigValue("Group", "Name", "discord");
 
         private string MsgAlreadyVerified => GetConfigValue("Messages", "AlreadyVerified", "You have already been verified.");
@@ -27,7 +32,9 @@ namespace Oxide.Plugins
         private string MsgConnectionError => GetConfigValue("Messages", "ConnectionError", "Could not connect to verification service.");
         private string MsgParseError => GetConfigValue("Messages", "ParseError", "Error parsing the verification response.");
         private string MsgDiscordLink => GetConfigValue("Messages", "DiscordLink", "Link your Discord account at https://example.com");
+        #endregion
 
+        #region Plugin Lifecycle
         private void Init()
         {
             Puts("DiscordLink Loaded!");
@@ -41,7 +48,6 @@ namespace Oxide.Plugins
                 Puts($"Created permission group '{DiscordGroup}'.");
             }
 
-            // Get WebSocket extension
             _webSocketExt = Interface.Oxide.GetExtension<WebSocketClientExtension>();
             if (_webSocketExt == null)
             {
@@ -49,18 +55,41 @@ namespace Oxide.Plugins
                 return;
             }
 
-            // Connect to WebSocket server
             Task.Run(async () => await ConnectToWebSocket());
         }
 
+        private void Unload()
+        {
+            _isUnloading = true;
+
+            _reconnectTimer?.Destroy();
+            _reconnectTimer = null;
+
+            if (_webSocketExt != null && _webSocketExt.IsConnected(ConnectionId))
+            {
+                Task.Run(async () => await _webSocketExt.DisconnectAsync(ConnectionId));
+            }
+        }
+        #endregion
+
+        #region WebSocket Connection
         private async Task ConnectToWebSocket()
         {
+            if (_isConnecting || _isUnloading)
+            {
+                return;
+            }
+
+            _isConnecting = true;
+
             try
             {
+                Puts($"Attempting to connect to WebSocket server: {WebSocketUrl}");
                 bool connected = await _webSocketExt.ConnectAsync(ConnectionId, WebSocketUrl, this);
+
                 if (connected)
                 {
-                    Puts($"Connected to WebSocket server: {WebSocketUrl}");
+                    Puts($"Successfully connected to WebSocket server: {WebSocketUrl}");
                 }
                 else
                 {
@@ -71,18 +100,14 @@ namespace Oxide.Plugins
             {
                 PrintError($"Error connecting to WebSocket: {ex.Message}");
             }
-        }
-
-        private void Unload()
-        {
-            // Disconnect from WebSocket when plugin unloads
-            if (_webSocketExt != null && _webSocketExt.IsConnected(ConnectionId))
+            finally
             {
-                Task.Run(async () => await _webSocketExt.DisconnectAsync(ConnectionId));
+                _isConnecting = false;
             }
         }
+        #endregion
 
-        // WebSocket event handlers
+        #region WebSocket Event Handlers
         [HookMethod("OnWebSocketConnected")]
         private void OnWebSocketConnected(string connectionId)
         {
@@ -95,9 +120,17 @@ namespace Oxide.Plugins
         [HookMethod("OnWebSocketConnectionFailed")]
         private void OnWebSocketConnectionFailed(string connectionId, string error)
         {
-            if (connectionId == ConnectionId)
+            if (connectionId == ConnectionId && !_isUnloading)
             {
                 PrintError($"WebSocket connection failed: {error}");
+
+                _reconnectTimer?.Destroy();
+                _reconnectTimer = timer.Once(10f, () => {
+                    if (!_isUnloading)
+                    {
+                        Task.Run(async () => await ConnectToWebSocket());
+                    }
+                });
             }
         }
 
@@ -114,25 +147,41 @@ namespace Oxide.Plugins
         [HookMethod("OnWebSocketDisconnected")]
         private void OnWebSocketDisconnected(string connectionId)
         {
-            if (connectionId == ConnectionId)
+            if (connectionId == ConnectionId && !_isUnloading)
             {
                 PrintWarning("WebSocket verification service disconnected!");
 
-                // Attempt to reconnect after 5 seconds
-                timer.Once(5f, () => Task.Run(async () => await ConnectToWebSocket()));
+                _reconnectTimer?.Destroy();
+
+                _reconnectTimer = timer.Once(5f, () => {
+                    if (!_isUnloading)
+                    {
+                        Task.Run(async () => await ConnectToWebSocket());
+                    }
+                });
             }
         }
 
         [HookMethod("OnWebSocketError")]
         private void OnWebSocketError(string connectionId, string error)
         {
-            if (connectionId == ConnectionId)
+            if (connectionId == ConnectionId && !_isUnloading)
             {
                 PrintError($"WebSocket error: {error}");
+
+                _reconnectTimer?.Destroy();
+
+                _reconnectTimer = timer.Once(10f, () => {
+                    if (!_isUnloading)
+                    {
+                        Task.Run(async () => await ConnectToWebSocket());
+                    }
+                });
             }
         }
+        #endregion
 
-        // Command handlers
+        #region Command Handlers
         private void CmdDiscord(IPlayer player, string command, string[] args)
         {
             player.Reply(MsgDiscordLink);
@@ -146,31 +195,32 @@ namespace Oxide.Plugins
                 return;
             }
 
-            // Send request for verification data (you can customize this message format)
             string requestMessage = $"{{\"action\":\"verify\",\"steamId\":\"{player.Id}\"}}";
 
             Task.Run(async () =>
             {
-                bool sent = await _webSocketExt.SendMessageAsync(ConnectionId, requestMessage);
-                if (!sent)
+                try
                 {
+                    bool sent = await _webSocketExt.SendMessageAsync(ConnectionId, requestMessage);
+                    if (!sent)
+                    {
+                        player.Reply(MsgConnectionError);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    PrintError($"Error sending verification request: {ex.Message}");
                     player.Reply(MsgConnectionError);
                 }
             });
         }
+        #endregion
 
-
-        private class WebSocketMessage
-        {
-            public string type { get; set; }
-            public VerifiedUser data { get; set; }
-        }
-
+        #region Data Processing
         private void ProcessVerificationData(string jsonResponse)
         {
             try
             {
-
                 WebSocketMessage message = JsonConvert.DeserializeObject<WebSocketMessage>(jsonResponse);
 
                 if (message != null && message.type == "user_verified" && message.data != null)
@@ -189,11 +239,9 @@ namespace Oxide.Plugins
             catch (Exception ex)
             {
                 PrintError($"Failed to parse verification data: {ex.Message} (Input: {jsonResponse})");
-                // Log the inner exception if available for more details
                 if (ex.InnerException != null)
                 {
                     PrintError($"Inner Exception: {ex.InnerException.Message}");
-                    PrintError($"Inner Exception Stack Trace: {ex.InnerException.StackTrace}");
                 }
             }
         }
@@ -220,7 +268,6 @@ namespace Oxide.Plugins
                 }
                 else
                 {
-                    // User not online, still add to group for when they connect
                     if (!permission.UserHasGroup(steamId, DiscordGroup))
                     {
                         permission.AddUserGroup(steamId, DiscordGroup);
@@ -233,6 +280,14 @@ namespace Oxide.Plugins
                 PrintError($"Error processing user verification: {ex.Message}");
             }
         }
+        #endregion
+
+        #region Data Classes
+        private class WebSocketMessage
+        {
+            public string type { get; set; }
+            public VerifiedUser data { get; set; }
+        }
 
         private class VerifiedUser
         {
@@ -244,13 +299,14 @@ namespace Oxide.Plugins
             public string discordUsername { get; set; }
             public string discordAvatar { get; set; }
         }
+        #endregion
 
-        // Configuration
+        #region Configuration
         protected override void LoadDefaultConfig()
         {
             LogWarning("Generating new config file...");
 
-            Config["API", "WebSocketUrl"] = "ws://localhost:3000/";
+            Config["API", "WebSocketUrl"] = "wss://api.spectality.net";
             Config["Group", "Name"] = "discord";
 
             Config["Messages", "AlreadyVerified"] = "You have already been verified.";
@@ -269,5 +325,6 @@ namespace Oxide.Plugins
                 return (T)Convert.ChangeType(value, typeof(T));
             return defaultValue;
         }
+        #endregion
     }
 }
