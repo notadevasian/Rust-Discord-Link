@@ -23,7 +23,7 @@ namespace Oxide.Plugins
         #endregion
 
         #region Configuration Properties
-        private string WebSocketUrl => GetConfigValue("API", "WebSocketUrl", "wss://api.spectality.net");
+        private string WebSocketUrl => GetConfigValue("API", "WebSocketUrl", "");
         private string DiscordGroup => GetConfigValue("Group", "Name", "discord");
 
         private string MsgAlreadyVerified => GetConfigValue("Messages", "AlreadyVerified", "You have already been verified.");
@@ -306,7 +306,7 @@ namespace Oxide.Plugins
         {
             LogWarning("Generating new config file...");
 
-            Config["API", "WebSocketUrl"] = "wss://api.spectality.net";
+            Config["API", "WebSocketUrl"] = "";
             Config["Group", "Name"] = "discord";
 
             Config["Messages", "AlreadyVerified"] = "You have already been verified.";
@@ -327,4 +327,5 @@ namespace Oxide.Plugins
         }
         #endregion
     }
+
 }
