@@ -112,3 +112,4 @@ void OnWebSocketError(string connectionId, string errorMessage)
     // Log for debugging, attempt reconnection, etc.
 }
 ```
+OUTDATED README, Updated one coming
